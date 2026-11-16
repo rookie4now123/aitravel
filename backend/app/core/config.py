@@ -4,10 +4,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 try:
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, event
     from sqlalchemy.orm import declarative_base, sessionmaker
 except ImportError:
     create_engine = None
+    event = None
     declarative_base = None
     sessionmaker = None
 
@@ -23,8 +24,25 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 SQLITE_DB_PATH = DB_DIR / "app.db"
 DATABASE_URL = f"sqlite:///{SQLITE_DB_PATH.as_posix()}"
 
-if create_engine is not None and sessionmaker is not None and declarative_base is not None:
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+if (
+    create_engine is not None
+    and event is not None
+    and sessionmaker is not None
+    and declarative_base is not None
+):
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _configure_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.execute("PRAGMA busy_timeout=30000;")
+        cursor.close()
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base = declarative_base()
 else:
@@ -61,9 +79,10 @@ REDIS_MAP_TTL_SECONDS = int(os.getenv("REDIS_MAP_TTL_SECONDS", "86400"))
 REDIS_RAG_TTL_SECONDS = int(os.getenv("REDIS_RAG_TTL_SECONDS", "21600"))
 
 
-# Google Maps configuration
+# Google Maps & Weather configuration
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
-GOOGLE_MAPS_BASE_URL = os.getenv("GOOGLE_MAPS_BASE_URL", "https://www.google.com/maps")
+GOOGLE_MAPS_BASE_URL = os.getenv("GOOGLE_MAPS_BASE_URL", "https://maps.googleapis.com/maps/api")
+GOOGLE_WEATHER_BASE_URL = os.getenv("GOOGLE_WEATHER_BASE_URL", "https://weather.googleapis.com/v1")
 GOOGLE_MAPS_DEFAULT_CITY = os.getenv("GOOGLE_MAPS_DEFAULT_CITY", "Krakow")
 GOOGLE_MAPS_TIMEOUT_SECONDS = int(os.getenv("GOOGLE_MAPS_TIMEOUT_SECONDS", "20"))
 ENABLE_GOOGLE_MAPS_ENRICHMENT = os.getenv("ENABLE_GOOGLE_MAPS_ENRICHMENT", "false").lower() == "true"

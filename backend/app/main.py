@@ -1,7 +1,31 @@
+from contextlib import asynccontextmanager
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.endpoints import api_router
+from app.rag.sqlite_store import ingest_guide_chunks_to_sqlite
+from app.services.cache_service import close_redis_client
+from app.services.storage_service import init_db
+
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialize application resources on startup and clean up on shutdown."""
+    init_db()
+    try:
+        chunk_count = ingest_guide_chunks_to_sqlite()
+        logger.info("Indexed %d RAG guide chunks into SQLite FTS.", chunk_count)
+    except Exception as exc:
+        logger.warning("Failed to ingest RAG guide chunks on startup: %s", exc)
+    try:
+        yield
+    finally:
+        close_redis_client()
 
 
 def create_app() -> FastAPI:
@@ -9,6 +33,7 @@ def create_app() -> FastAPI:
         title="Trip Planner Demo Backend",
         description="MVP backend for the intelligent travel assistant.",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     app.add_middleware(

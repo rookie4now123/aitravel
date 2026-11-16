@@ -1,7 +1,7 @@
 from app.rag.retriever import retrieve_travel_guide
 
 
-# rag_tool.py only responsible for building the query for retrieval based on travel planning semantics.
+# rag_tool.py is responsible for building the retrieval query based on travel planning semantics.
 
 def _append_unique(parts: list[str], value: str) -> None:
     normalized = value.strip()
@@ -17,39 +17,34 @@ def _extract_note_keywords(special_notes: str | None, destination: str | None = 
         return []
 
     keywords: list[str] = []
-    note = special_notes.strip()
+    note_lower = special_notes.strip().lower()
+    dest_lower = (destination or "").strip().lower()
 
-    # Formate: (trigger_words, destination_filter, output_keywords)
-    # Destination filter is used to make sure the extracted keyword is more relevant to the destination. For example, "古镇" can be a keyword for multiple destinations, but "回民街" is more specific to 西安.
+    # Format: (trigger_words, destination_filter, output_keywords)
     rule_keywords = [
-      (("sunset", "evening"), "Barcelona", ["sunset", "evening", "beach", "Barceloneta"]),
-    (("sunrise", "morning"), "Paris", ["sunrise", "Seine", "Eiffel Tower"]),
-    (("photography", "photos", "shooting"), None, ["photography", "city view", "landmarks"]),
-    (("food", "local food", "eat"), None, ["food", "local cuisine"]),
-    (("relax", "slow pace", "chill"), None, ["relax", "slow pace", "café culture"]),
-    (("sleep in", "no early wake up"), None, ["relax", "slow pace"]),
-    
-    (("old town",), "Krakow", ["old town", "Wawel Castle", "Kazimierz"]),
-    (("old town",), "Florence", ["old town", "Duomo", "Piazza della Signoria"]),
-    (("old town",), "Barcelona", ["old town", "Gothic Quarter"]),
-    
-    (("cycling",), "Milan", ["cycling", "city streets", "parks"]),
-    (("cycling",), "Barcelona", ["cycling", "coastal road"]),
-    
-    (("art", "museum"), "Paris", ["art", "Louvre", "museum"]),
-    (("art", "museum"), "Florence", ["art", "Uffizi Gallery", "Renaissance"]),
-    
-    (("architecture",), "Barcelona", ["architecture", "Sagrada Familia", "Gaudi"]),
-    (("architecture",), "Madrid", ["architecture", "Royal Palace"]),
-    
-    (("nightlife",), "Madrid", ["nightlife", "bars", "city center"]),
-    (("shopping",), "Milan", ["shopping", "fashion district"]),
+        (("sunset", "evening"), "Barcelona", ["sunset", "evening", "beach", "Barceloneta"]),
+        (("sunrise", "morning"), "Paris", ["sunrise", "Seine", "Eiffel Tower"]),
+        (("photography", "photos", "shooting"), None, ["photography", "city view", "landmarks"]),
+        (("food", "local food", "eat"), None, ["food", "local cuisine"]),
+        (("relax", "slow pace", "chill"), None, ["relax", "slow pace", "café culture"]),
+        (("sleep in", "no early wake up"), None, ["relax", "slow pace"]),
+        (("old town",), "Krakow", ["old town", "Wawel Castle", "Kazimierz"]),
+        (("old town",), "Florence", ["old town", "Duomo", "Piazza della Signoria"]),
+        (("old town",), "Barcelona", ["old town", "Gothic Quarter"]),
+        (("cycling",), "Milan", ["cycling", "city streets", "parks"]),
+        (("cycling",), "Barcelona", ["cycling", "coastal road"]),
+        (("art", "museum"), "Paris", ["art", "Louvre", "museum"]),
+        (("art", "museum"), "Florence", ["art", "Uffizi Gallery", "Renaissance"]),
+        (("architecture",), "Barcelona", ["architecture", "Sagrada Familia", "Gaudi"]),
+        (("architecture",), "Madrid", ["architecture", "Royal Palace"]),
+        (("nightlife",), "Madrid", ["nightlife", "bars", "city center"]),
+        (("shopping",), "Milan", ["shopping", "fashion district"]),
     ]
 
     for triggers, required_dest, values in rule_keywords:
-        if required_dest and destination and required_dest not in destination:
+        if required_dest and dest_lower and required_dest.lower() not in dest_lower:
             continue
-        if any(trigger in note for trigger in triggers):
+        if any(trigger.lower() in note_lower for trigger in triggers):
             for value in values:
                 _append_unique(keywords, value)
 
@@ -75,7 +70,6 @@ def build_destination_query(
     for keyword in _extract_note_keywords(special_notes, destination=destination):
         _append_unique(parts, keyword)
 
-    #add some stable travel semantic terms for better retrieval of relevant guide segments, such as attractions, itinerary, guide, recommendation, etc.
     for stable_term in ["Scenic Spots", "Itinerary", "Plan", "Recommendation"]:
         _append_unique(parts, stable_term)
 
@@ -111,4 +105,4 @@ def get_destination_guide_context(
         pace=pace,
         special_notes=special_notes,
     )
-    return retrieve_travel_guide(query=query, top_k=top_k)
+    return retrieve_travel_guide(query=query, top_k=top_k, destination=destination)

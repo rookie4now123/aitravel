@@ -22,7 +22,7 @@ router = APIRouter(prefix="/trip", tags=["trip"])
 
 @router.get("", response_model=TripListResponse)
 def list_trips() -> TripListResponse:
-    """Return to the saved itinerary summary list."""
+    """Return the saved itinerary summary list."""
     return list_saved_itineraries()
 
 
@@ -41,7 +41,12 @@ def edit_trip(request: TripEditRequest) -> Itinerary:
 @router.post("/save")
 def save_trip(request: TripSaveRequest) -> dict[str, str]:
     """Save itinerary and return trip_id."""
-    saved_trip_id = save_itinerary(request.itinerary)
+    itinerary = (
+        request.itinerary.model_copy(update={"trip_id": request.trip_id})
+        if request.trip_id
+        else request.itinerary
+    )
+    saved_trip_id = save_itinerary(itinerary)
     return {
         "message": "Trip itinerary saved successfully.",
         "trip_id": saved_trip_id,

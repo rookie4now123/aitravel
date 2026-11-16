@@ -58,6 +58,9 @@ def _build_document_text(chunk: dict[str, str]) -> str:
 
 def load_guide_chunks() -> list[dict[str, str]]:
     """Read the guide files under backend/data and split them into retrievable chunks."""
+    if not DATA_DIR.exists():
+        return []
+
     chunks: list[dict[str, str]] = []
     for guide_file in sorted(DATA_DIR.glob("*.md*")):
         text = guide_file.read_text(encoding="utf-8")
@@ -81,9 +84,10 @@ def _extract_keywords(query: str) -> list[str]:
 
 
 def _score_chunk(query: str, chunk_text: str) -> int:
-    """Score a chunk based on the frequency of keyword occurrences."""
+    """Score a chunk based on case-insensitive keyword occurrences."""
     keywords = _extract_keywords(query)
-    return sum(1 for keyword in keywords if keyword in chunk_text)
+    chunk_lower = chunk_text.lower()
+    return sum(1 for keyword in keywords if keyword.lower() in chunk_lower)
 
 
 def _search_guide_chunks_by_keywords(query: str, top_k: int = 3) -> list[dict[str, str]]:
@@ -100,8 +104,10 @@ def _search_guide_chunks_by_keywords(query: str, top_k: int = 3) -> list[dict[st
 
 def _connect() -> sqlite3.Connection:
     RAG_SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(RAG_SQLITE_DB_PATH)
+    connection = sqlite3.connect(RAG_SQLITE_DB_PATH, timeout=30.0)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL;")
+    connection.execute("PRAGMA busy_timeout=30000;")
     return connection
 
 
@@ -175,7 +181,7 @@ def _build_fts_query(query: str) -> str:
 
 
 def _search_guide_chunks_by_sqlite(query: str, top_k: int = 3) -> list[dict[str, str]]:
-    """Search the ingested guide chunks using SQLite FTS first. If the index is not ready, fallback to keyword matching."""
+    """Search the ingested guide chunks using SQLite FTS first."""
     fts_query = _build_fts_query(query)
     if not fts_query or not RAG_SQLITE_DB_PATH.exists():
         return []

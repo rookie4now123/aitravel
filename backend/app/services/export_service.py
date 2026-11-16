@@ -1,39 +1,43 @@
 from __future__ import annotations
 
 from io import BytesIO
-from urllib.request import Request, urlopen
+import ipaddress
+from pathlib import Path
+import socket
+from urllib.parse import urlparse
 from xml.sax.saxutils import escape
+
+import httpx
 
 from app.schemas.trip import Itinerary, TripDetailResponse
 
 
-TECHNICAL_EXPORT_KEYWORDS = (
-    "LLM",
-    "RAG",
-    "LangChain",
-    "SQLite",
-    "Demonstrate",
-    "Test",
-    "Rules",
-    "Modules",
-    "Source Code",
+TECHNICAL_EXPORT_PHRASES = (
+    "llm",
+    "rag",
+    "langchain",
+    "sqlite",
     "trip_service",
+    "source code",
+    "rule-based",
+    "fallback",
 )
 
 
 def _safe_text(value: object) -> str:
-    """Transform special characters in ReportLab Paragraph to prevent them from being parsed as tags."""
+    """Escape special XML characters in ReportLab Paragraph text."""
     return escape(str(value or ""))
 
 
 def _clean_export_tips(tips: list[str]) -> list[str]:
-    """Expot internal explain"""
+    """Filter out internal technical notes from exported tips."""
     cleaned_tips: list[str] = []
     for tip in tips:
         normalized_tip = tip.strip()
         if not normalized_tip:
             continue
-        if any(keyword in normalized_tip for keyword in TECHNICAL_EXPORT_KEYWORDS):
+        tip_lower = normalized_tip.lower()
+        if any(phrase in tip_lower for phrase in TECHNICAL_EXPORT_PHRASES):
             continue
         if normalized_tip not in cleaned_tips:
             cleaned_tips.append(normalized_tip)
@@ -41,13 +45,14 @@ def _clean_export_tips(tips: list[str]) -> list[str]:
 
 
 def _public_source_notes(source_notes: list[str]) -> list[str]:
-    """Keep reader-friendly source notes that are suitable for export, and filter out technical implementation details."""
+    """Keep reader-friendly source notes that are suitable for export."""
     public_notes: list[str] = []
     for note in source_notes:
         normalized_note = note.strip()
         if not normalized_note:
             continue
-        if any(keyword in normalized_note for keyword in TECHNICAL_EXPORT_KEYWORDS):
+        note_lower = normalized_note.lower()
+        if any(phrase in note_lower for phrase in TECHNICAL_EXPORT_PHRASES):
             continue
         if normalized_note.startswith("[Source:"):
             public_notes.append(normalized_note)
@@ -55,7 +60,7 @@ def _public_source_notes(source_notes: list[str]) -> list[str]:
 
 
 def _render_budget_lines(itinerary: Itinerary) -> list[str]:
-    """Split the budget breakdown into Markdown list format."""
+    """Format the budget breakdown into a Markdown list."""
     budget = itinerary.budget_breakdown
     return [
         f"- Transport: {budget.transport:.2f} USD",
@@ -68,7 +73,7 @@ def _render_budget_lines(itinerary: Itinerary) -> list[str]:
 
 
 def itinerary_to_markdown(trip_detail: TripDetailResponse) -> str:
-    """Render itinerary to markdown"""
+    """Render itinerary to Markdown."""
     itinerary = trip_detail.itinerary
 
     lines: list[str] = [
@@ -105,20 +110,20 @@ def itinerary_to_markdown(trip_detail: TripDetailResponse) -> str:
         for meal in day.meals:
             lines.extend(
                 [
-                    f"- Diet Advice: {meal.name}({meal.meal_type})",
-                    f"  - Introduction:{meal.notes or 'No'}",
+                    f"- Meal Recommendation: {meal.name} ({meal.meal_type})",
+                    f"  - Notes: {meal.notes or 'None'}",
                 ]
             )
 
         if day.hotel is not None:
             lines.append(
-                f"- Hotel: {day.hotel.name}({day.hotel.level or 'Level not specified'})"
+                f"- Hotel: {day.hotel.name} ({day.hotel.level or 'Level not specified'})"
             )
 
         for note in day.notes:
-            lines.append(f"- Note:{note}")
+            lines.append(f"- Note: {note}")
 
-    lines.extend(["", "## Split Budget", *_render_budget_lines(itinerary)])
+    lines.extend(["", "## Budget Breakdown", *_render_budget_lines(itinerary)])
 
     export_tips = _clean_export_tips(itinerary.tips)
     if export_tips:
@@ -127,23 +132,44 @@ def itinerary_to_markdown(trip_detail: TripDetailResponse) -> str:
 
     public_notes = _public_source_notes(itinerary.source_notes)
     if public_notes:
-        lines.extend(["", "## Reference"])
+        lines.extend(["", "## References"])
         lines.extend(f"- {note}" for note in public_notes)
 
     return "\n".join(lines).strip() + "\n"
 
 
 def _register_pdf_font() -> str:
-    """fff"""
+    """Register a Unicode TrueType font supporting European diacritics, falling back to Helvetica."""
     from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
 
-    font_name = "STSong-Light"
+    font_name = "TripUnicodeSans"
     try:
         pdfmetrics.getFont(font_name)
+        return font_name
     except KeyError:
-        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
-    return font_name
+        pass
+
+    candidate_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ]
+
+    for raw_path in candidate_paths:
+        font_path = Path(raw_path)
+        if font_path.exists():
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+                return font_name
+            except Exception:
+                continue
+
+    return "Helvetica"
 
 
 def _draw_pdf_footer(canvas, doc, trip_detail: TripDetailResponse, font_name: str) -> None:
@@ -162,25 +188,61 @@ def _draw_pdf_footer(canvas, doc, trip_detail: TripDetailResponse, font_name: st
 
     canvas.setFont(font_name, 9)
     canvas.setFillColor(colors.HexColor("#52606d"))
-    canvas.drawString(doc.leftMargin, footer_y, f"Trip Planner Demo | {trip_detail.trip_id}")
-    canvas.drawRightString(page_width - doc.rightMargin, footer_y, f"第 {canvas.getPageNumber()} 页")
+    canvas.drawString(doc.leftMargin, footer_y, f"Trip Planner | {trip_detail.trip_id}")
+    canvas.drawRightString(page_width - doc.rightMargin, footer_y, f"Page {canvas.getPageNumber()}")
     canvas.restoreState()
 
 
+def _is_safe_public_http_url(url: str) -> bool:
+    """Validate that a URL is an http(s) URL resolving strictly to public IP addresses (anti-SSRF)."""
+    try:
+        parsed = urlparse(url.strip())
+    except ValueError:
+        return False
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+
+    try:
+        addr_infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror:
+        return False
+
+    if not addr_infos:
+        return False
+
+    for info in addr_infos:
+        ip_str = info[4][0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        if not ip_obj.is_global:
+            return False
+
+    return True
+
+
 def _load_pdf_image(image_url: str, max_width: float, max_height: float):
-    """None。Download the spot image and convert it into a ReportLab renderable object, return None if fails."""
+    """Safely download a spot image and convert it into a ReportLab Image object, or return None."""
     from reportlab.platypus import Image
 
-    if not image_url:
+    if not image_url or not _is_safe_public_http_url(image_url):
         return None
 
     try:
-        request = Request(
-            image_url,
-            headers={"User-Agent": "TripPlannerDemo/1.0"},
-        )
-        with urlopen(request, timeout=5) as response:
-            image_bytes = response.read(2_000_000)
+        with httpx.Client(timeout=4.0, follow_redirects=False) as client:
+            response = client.get(
+                image_url,
+                headers={"User-Agent": "TripPlannerDemo/1.0"},
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "").lower()
+            if not content_type.startswith("image/"):
+                return None
+            image_bytes = response.content[:2_000_000]
+            if len(response.content) > 2_000_000:
+                return None
     except Exception:
         return None
 
@@ -193,7 +255,7 @@ def _load_pdf_image(image_url: str, max_width: float, max_height: float):
 
 
 def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
-    """Render the complete itinerary into PDF binary content with better formatting."""
+    """Render the complete itinerary into styled PDF bytes."""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -221,7 +283,7 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         leftMargin=16 * mm,
         rightMargin=16 * mm,
         topMargin=14 * mm,
-        bottomMargin=14 * mm,
+        bottomMargin=16 * mm,
         title=f"{trip_detail.trip_id}.pdf",
     )
 
@@ -234,7 +296,6 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         leading=28,
         textColor=colors.HexColor("#16324f"),
         spaceAfter=8,
-        wordWrap="CJK",
     )
     subtitle_style = ParagraphStyle(
         "TripSubtitle",
@@ -244,7 +305,6 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         leading=14,
         textColor=colors.HexColor("#4b5d73"),
         spaceAfter=10,
-        wordWrap="CJK",
     )
     section_style = ParagraphStyle(
         "TripSection",
@@ -255,7 +315,6 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         textColor=colors.HexColor("#0f4c5c"),
         spaceBefore=10,
         spaceAfter=6,
-        wordWrap="CJK",
     )
     day_style = ParagraphStyle(
         "TripDay",
@@ -266,7 +325,6 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         textColor=colors.HexColor("#1b4332"),
         spaceBefore=6,
         spaceAfter=4,
-        wordWrap="CJK",
     )
     body_style = ParagraphStyle(
         "TripBody",
@@ -276,7 +334,6 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
         leading=15,
         textColor=colors.HexColor("#222222"),
         spaceAfter=4,
-        wordWrap="CJK",
     )
     note_style = ParagraphStyle(
         "TripNote",
@@ -298,11 +355,11 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
 
     meta_table = Table(
         [
-            ["Trip Duration", str(len(itinerary.days))],
+            ["Trip Duration", f"{len(itinerary.days)} days"],
             ["Created At", trip_detail.created_at.isoformat() if trip_detail.created_at else "Not recorded"],
             ["Updated At", trip_detail.updated_at.isoformat() if trip_detail.updated_at else "Not recorded"],
         ],
-        colWidths=[28 * mm, 120 * mm],
+        colWidths=[32 * mm, 120 * mm],
     )
     meta_table.setStyle(
         TableStyle(
@@ -327,21 +384,21 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
     for day in itinerary.days:
         title = f"Day {day.day_index}"
         if day.theme:
-            title += f" · {day.theme}"
-        story.append(Paragraph(title, day_style))
+            title += f" - {day.theme}"
+        story.append(Paragraph(_safe_text(title), day_style))
 
         if day.date:
             story.append(Paragraph(f"Date: {day.date.isoformat()}", body_style))
 
         for spot in day.spots:
-            story.append(Paragraph(f"Primary Attractions: {_safe_text(spot.name)}", body_style))
+            story.append(Paragraph(f"Main Attraction: {_safe_text(spot.name)}", body_style))
             image_url = getattr(spot, "image_url", None)
             spot_image = _load_pdf_image(image_url or "", max_width=72 * mm, max_height=42 * mm)
             if spot_image is not None:
                 story.extend([spot_image, Spacer(1, 4)])
             story.append(
                 Paragraph(
-                    f"Time: {_safe_text(spot.start_time or 'Pending')} - {_safe_text(spot.end_time or 'Pending')}",
+                    f"Time: {_safe_text(spot.start_time or 'TBA')} - {_safe_text(spot.end_time or 'TBA')}",
                     note_style,
                 )
             )
@@ -380,7 +437,7 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
     budget = itinerary.budget_breakdown
     budget_table = Table(
         [
-            ["Item", "Amount (CNY)"],
+            ["Item", "Amount (USD)"],
             ["Transportation", f"{budget.transport:.2f}"],
             ["Accommodation", f"{budget.hotel:.2f}"],
             ["Meals", f"{budget.meals:.2f}"],
@@ -416,7 +473,7 @@ def itinerary_to_pdf_bytes(trip_detail: TripDetailResponse) -> bytes:
 
     public_notes = _public_source_notes(itinerary.source_notes)
     if public_notes:
-        story.append(Paragraph("Strategy References", section_style))
+        story.append(Paragraph("References", section_style))
         for note in public_notes:
             story.append(Paragraph(f"- {_safe_text(note)}", body_style))
 

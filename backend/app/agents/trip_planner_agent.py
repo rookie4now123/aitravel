@@ -16,7 +16,7 @@ from app.schemas.trip import DayPlan, TripEditRequest, TripRequest
 
 
 class PlannerDayDraft(BaseModel):
-    """LLM returns draft for a single day from LLM."""
+    """Structured draft for a single day returned by the LLM."""
 
     day_index: int = Field(..., ge=1)
     theme: str = Field(..., description="Short theme for the day, e.g., 'Relaxing Beach Day' or 'Cultural Exploration'.")
@@ -28,7 +28,7 @@ class PlannerDayDraft(BaseModel):
 
 
 class PlannerDraft(BaseModel):
-    """Provide structured trip draft for trip_service.py."""
+    """Structured trip draft consumed by trip_service.py."""
 
     summary: str = Field(..., description="Short overview of the entire trip")
     tips: list[str] = Field(default_factory=list, description="Travel tips")
@@ -36,7 +36,7 @@ class PlannerDraft(BaseModel):
 
 
 class DayEditDraft(BaseModel):
-    """LLM returns draft for editing a single day."""
+    """Structured draft for editing a single day returned by the LLM."""
 
     theme: str = Field(..., description="Edited theme for the day")
     spot_name: str = Field(..., description="Edited name of the main attraction for the day")
@@ -47,7 +47,7 @@ class DayEditDraft(BaseModel):
 
 
 def _normalize_day_edit_payload(payload: dict) -> dict:
-    """Compatible with model returns of two different daily edit formats."""
+    """Support both flat and nested day edit payload formats."""
     if "spot_name" in payload and "meal_name" in payload and "daily_note" in payload:
         return payload
 
@@ -73,7 +73,7 @@ def _normalize_day_edit_payload(payload: dict) -> dict:
 
 
 def _extract_json_object(raw_text: str) -> str | None:
-    """Extract JSON object string from raw model text as much as possible."""
+    """Fallback JSON extraction from raw model text."""
     text = raw_text.strip()
 
     if text.startswith("```"):
@@ -94,6 +94,16 @@ def _extract_json_object(raw_text: str) -> str | None:
     return text[start_index : end_index + 1]
 
 
+def _extract_raw_text(response: object) -> str:
+    raw_text = getattr(response, "content", "")
+    if isinstance(raw_text, list):
+        return "".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in raw_text
+        )
+    return str(raw_text)
+
+
 def collect_trip_context(
     destination: str,
     preferences: list[str] | None = None,
@@ -112,7 +122,7 @@ def collect_trip_context(
 
 
 def _build_chat_llm():
-    """Create instance of ChatOpenAI for general use."""
+    """Create ChatGoogleGenerativeAI instance."""
     if not LLM_API_KEY:
         return None
 
@@ -137,9 +147,9 @@ def generate_planner_draft(
     day_count: int,
 ) -> PlannerDraft | None:
     """
-    Generate structured trip draft using LangChain.
-    If the current environment is not ready for model invocation, return None,
-    allowing the service layer to fall back to the rule-based implementation.
+    Generate structured trip draft using LangChain `.with_structured_output`.
+    Falls back to manual JSON extraction if schema-constrained invocation fails,
+    and returns None if model invocation is unavailable so trip_service can fall back.
     """
     llm = _build_chat_llm()
     if llm is None:
@@ -149,11 +159,12 @@ def generate_planner_draft(
 
     system_prompt = (
         "You are a travel planning assistant. "
-        "Please generate a concise structured travel draft in europe."
-        "You need to follow the user's destination, budget, pace, and local guide context."
-        "You must only output one JSON object, do not output Markdown, do not output explanation text, do not output code blocks."
-        "The output content must strictly comply with the given structured field requirements."
-        "If the user explicitly states specific requests in the additional notes, such as wanting to see the sunset, not wanting to wake up early, preferring less spice, or taking photos, you should prioritize incorporating these requests into the specific attractions or daily plans for a particular day, rather than just writing general tips."
+        "Please generate a concise structured travel draft in Europe. "
+        "Follow the user's destination, budget, pace, and local guide context. "
+        "If the user explicitly states specific requests in the additional notes—such as wanting to see "
+        "the sunset, not wanting to wake up early, preferring less spice, or taking photos—prioritize "
+        "incorporating these requests into the specific attractions or daily plans for a particular day "
+        "rather than only writing general tips."
     )
 
     human_prompt = f"""
@@ -163,9 +174,9 @@ End Date: {request.end_date.isoformat()}
 Day Count: {day_count}
 Travelers: {request.travelers}
 Budget: {request.budget}
-Preferences: {'、'.join(request.preferences) if request.preferences else 'No special preferences'}
+Preferences: {', '.join(request.preferences) if request.preferences else 'No special preferences'}
 Pace: {request.pace or 'Moderate'}
-Dietary Preferences: {'、'.join(request.dietary_preferences) if request.dietary_preferences else 'None'}
+Dietary Preferences: {', '.join(request.dietary_preferences) if request.dietary_preferences else 'None'}
 Hotel Level: {request.hotel_level or 'Comfortable'}
 Additional Notes: {request.special_notes or 'None'}
 
@@ -173,77 +184,57 @@ Local Guide Context:
 {guide_context}
 
 Requirements:
-1. Output a overall summary.
+1. Output an overall summary.
 2. Output the daily draft for {day_count} days.
 3. One main attraction, one meal recommendation, and one daily note for each day.
-4. tips keep clean。
-5. day_index must be from 1 to {day_count}。
-6. If there are specific requests in the additional notes, such as wanting to see the sunset or not wanting to wake up early, they must be reflected in the days section, not just placed in the tips.
-7. If the plan includes watching the sunset, the spot_name for that day should preferably be a location suitable for watching the sunset, or at least consistent with the sunset arrangement in the daily_note, to avoid a complete disconnect between the "main attraction" and the "sunset location".
-8. Everyday's arrangement should follow a "relaxed" pace, avoiding overcrowding and too early departure.
-9. Dining recommendations should prioritize that have already appeared in the local guide context.
-10. Only return a JSON object, do not return any additional explanations, do not use ```json code blocks.
-
-JSON Sample:
-{{
-  "summary": "Overall",
-  "tips": ["Hint1", "Hint2"],
-  "days": [
-    {{
-      "day_index": 1,
-      "theme": "Topic of the day",
-      "spot_name": "Main Attraction",
-      "spot_description": "Reason for recommendation",
-      "meal_name": "Meal Name",
-      "meal_notes": "Meal Notes",
-      "daily_note": "Daily Note"
-    }}
-  ]
-}}
+4. Keep tips concise and practical.
+5. day_index must be sequentially numbered from 1 to {day_count}.
+6. Specific requests in Additional Notes (such as watching the sunset or sleeping in) must be reflected directly in the days section, not just in tips.
+7. If the plan includes watching the sunset, the spot_name for that day should be a location suitable for watching the sunset and consistent with the daily_note.
+8. Every day's arrangement should follow the requested pace, avoiding overcrowding or overly early departures when relaxed.
+9. Dining recommendations should prioritize restaurants or dishes that appeared in the Local Guide Context.
 """
 
-    print(f"[trip_planner_agent] Ready to invoke LLM...")
+    messages = [
+        ("system", system_prompt),
+        ("human", human_prompt),
+    ]
+
+    print("[trip_planner_agent] Invoking LLM with structured output...")
     print(f"[trip_planner_agent] model = {LLM_MODEL}")
     print(f"[trip_planner_agent] base_url = {LLM_BASE_URL or '<DEFAULT>'}")
-    print(f"[trip_planner_agent] timeout = {LLM_TIMEOUT_SECONDS}s")
-    print(f"[trip_planner_agent] max_retries = {LLM_MAX_RETRIES}")
 
+    result: PlannerDraft | None = None
     try:
-        response = llm.invoke(
-            [
-                ("system", system_prompt),
-                ("human", human_prompt),
-            ]
+        structured_llm = llm.with_structured_output(PlannerDraft)
+        raw_result = structured_llm.invoke(messages)
+        result = (
+            raw_result
+            if isinstance(raw_result, PlannerDraft)
+            else PlannerDraft.model_validate(raw_result)
         )
     except Exception as exc:
-        print(f"[trip_planner_agent] Large model invocation failed: {type(exc).__name__}: {exc}")
-        return None
-
-    print("[trip_planner_agent] Large model invocation completed.")
-
-    raw_text = getattr(response, "content", "")
-    if isinstance(raw_text, list):
-        raw_text = "".join(
-            item.get("text", "") if isinstance(item, dict) else str(item)
-            for item in raw_text
+        print(
+            "[trip_planner_agent] Structured output invocation failed, trying raw JSON fallback: "
+            f"{type(exc).__name__}: {exc}"
         )
+        try:
+            response = llm.invoke(messages)
+            json_text = _extract_json_object(_extract_raw_text(response))
+            if json_text is not None:
+                result = PlannerDraft.model_validate(json.loads(json_text))
+        except Exception as fallback_exc:
+            print(
+                f"[trip_planner_agent] Fallback LLM invocation failed: {type(fallback_exc).__name__}: {fallback_exc}"
+            )
+            return None
 
-    json_text = _extract_json_object(str(raw_text))
-    if json_text is None:
-        print("[trip_planner_agent] Failed to extract JSON from model response.")
-        print(f"[trip_planner_agent] Primitive return preview {str(raw_text)[:300]}")
-        return None
-
-    try:
-        result = PlannerDraft.model_validate(json.loads(json_text))
-    except Exception as exc:
-        print(f"[trip_planner_agent] JSON parsing failed: {type(exc).__name__}: {exc}")
-        print(f"[trip_planner_agent] Primitive return preview: {str(raw_text)[:300]}")
+    if result is None:
         return None
 
     if len(result.days) != day_count:
         print(
-            "[trip_planner_agent] Structured result day count mismatch,"
+            "[trip_planner_agent] Structured result day count mismatch, "
             f"expected={day_count}, actual={len(result.days)}"
         )
         return None
@@ -256,9 +247,7 @@ def generate_day_edit_draft(
     target_day: DayPlan,
 ) -> DayEditDraft | None:
     """
-    Use LLM to generate a single day edit draft, return None if failed.
-    This function is only responsible for producing the edited result for the target day,
-    the final merging back to the complete itinerary is handled by the service layer.
+    Use LLM structured output to generate a single-day edit draft; return None if it fails.
     """
     llm = _build_chat_llm()
     if llm is None:
@@ -276,11 +265,9 @@ def generate_day_edit_draft(
     current_itinerary_payload = request.current_itinerary.model_dump(mode="json")
 
     system_prompt = (
-
         "You are a travel itinerary editing assistant. "
-        "According to the user's editing instructions, only rewrite the core arrangements for the target day. "
-        "You must only output a JSON object, do not output Markdown, do not output explanation text, do not output code blocks. "
-        "The edited result should keep itinerary style budget and relax "
+        "According to the user's editing instructions, rewrite only the core arrangements for the target day. "
+        "Keep the edited result aligned with the itinerary's city, budget, and relaxed style."
     )
 
     human_prompt = f"""
@@ -296,57 +283,43 @@ Constraints to preserve: {', '.join(request.preserve_constraints) if request.pre
 
 Requirements:
 1. Only output the edited result for the target day.
-2. If the user requests a "more relaxed" or "less crowded" experience, reduce the pressure of fixed attractions and make notes more natural.
-3. Try to maintain the original itinerary's city, style, dining tone, and budget structure.
-4. Do not output additional fields.
-5. Only return a JSON object.
-
-JSON structure example:
-{{
-  "theme": "Edited target day theme",
-  "spot_name": "Edited main attraction",
-  "spot_description": "Edited attraction description",
-  "meal_name": "Edited dining name",
-  "meal_notes": "Edited dining notes",
-  "daily_note": "Edited daily note"
-}}
+2. If the user requests a "more relaxed" or "less crowded" experience, reduce fixed attraction pressure and make notes natural.
+3. Maintain the original itinerary's city, style, dining tone, and budget structure.
 """
 
-    print("[trip_planner_agent] Invokeing LLM for day edit...")
+    messages = [
+        ("system", system_prompt),
+        ("human", human_prompt),
+    ]
+
+    print("[trip_planner_agent] Invoking LLM for structured day edit...")
     print(f"[trip_planner_agent] model = {LLM_MODEL}")
     print(f"[trip_planner_agent] base_url = {LLM_BASE_URL or '<DEFAULT>'}")
 
     try:
-        response = llm.invoke(
-            [
-                ("system", system_prompt),
-                ("human", human_prompt),
-            ]
+        structured_llm = llm.with_structured_output(DayEditDraft)
+        raw_result = structured_llm.invoke(messages)
+        return (
+            raw_result
+            if isinstance(raw_result, DayEditDraft)
+            else DayEditDraft.model_validate(raw_result)
         )
     except Exception as exc:
-        print(f"[trip_planner_agent] Failed to invoke day edit: {type(exc).__name__}: {exc}")
-        return None
-
-    raw_text = getattr(response, "content", "")
-    if isinstance(raw_text, list):
-        raw_text = "".join(
-            item.get("text", "") if isinstance(item, dict) else str(item)
-            for item in raw_text
+        print(
+            "[trip_planner_agent] Structured day edit failed, trying raw JSON fallback: "
+            f"{type(exc).__name__}: {exc}"
         )
-
-    json_text = _extract_json_object(str(raw_text))
-    if json_text is None:
-        print("[trip_planner_agent] Failed to extract JSON from day edit result.")
-        print(f"[trip_planner_agent] Raw response preview: {str(raw_text)[:300]}")
-        return None
-
-    try:
-        payload = json.loads(json_text)
-        if not isinstance(payload, dict):
-            raise ValueError("Single day edit result is not a JSON object.")
-        normalized_payload = _normalize_day_edit_payload(payload)
-        return DayEditDraft.model_validate(normalized_payload)
-    except Exception as exc:
-        print(f"[trip_planner_agent] Single day edit JSON parsing failed: {type(exc).__name__}: {exc}")
-        print(f"[trip_planner_agent] Raw response preview: {str(raw_text)[:300]}")
-        return None
+        try:
+            response = llm.invoke(messages)
+            json_text = _extract_json_object(_extract_raw_text(response))
+            if json_text is None:
+                return None
+            payload = json.loads(json_text)
+            if not isinstance(payload, dict):
+                raise ValueError("Single day edit result is not a JSON object.")
+            return DayEditDraft.model_validate(_normalize_day_edit_payload(payload))
+        except Exception as fallback_exc:
+            print(
+                f"[trip_planner_agent] Single day edit fallback failed: {type(fallback_exc).__name__}: {fallback_exc}"
+            )
+            return None

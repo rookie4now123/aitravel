@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import date as DateType, timedelta
+import re
+import unicodedata
+from uuid import uuid4
 
 from app.agents.trip_planner_agent import (
     collect_trip_context,
@@ -22,28 +25,39 @@ from app.schemas.trip import (
 from app.services.map_service import enrich_itinerary_with_map_data
 
 
-TECHNICAL_TIP_KEYWORDS = (
-    "LLM",
-    "RAG",
-    "LangChain",
-    "SQLite",
-    "Demonstrate",
-    "Test",
-    "Rules",
-    "Module",
-    "Source Code",
+TECHNICAL_TIP_PHRASES = (
+    "llm",
+    "rag",
+    "langchain",
+    "sqlite",
     "trip_service",
+    "source code",
+    "rule-based",
+    "fallback",
 )
 
 
+def _build_trip_id(destination: str, start_date: DateType) -> str:
+    """Create a unique, URL-safe trip_id."""
+    ascii_dest = (
+        unicodedata.normalize("NFKD", destination)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_dest).strip("-") or "trip"
+    return f"trip_{slug}_{start_date.isoformat()}_{uuid4().hex[:8]}"
+
+
 def _clean_user_tips(tips: list[str], destination: str | None = None) -> list[str]:
-    """Filter out internal implementation notes and keep only the travel tips that users can actually use."""
+    """Filter out internal implementation notes and keep only actionable travel tips."""
     cleaned_tips: list[str] = []
     for tip in tips:
         normalized_tip = tip.strip()
         if not normalized_tip:
             continue
-        if any(keyword in normalized_tip for keyword in TECHNICAL_TIP_KEYWORDS):
+        tip_lower = normalized_tip.lower()
+        if any(phrase in tip_lower for phrase in TECHNICAL_TIP_PHRASES):
             continue
         if normalized_tip not in cleaned_tips:
             cleaned_tips.append(normalized_tip)
@@ -53,27 +67,20 @@ def _clean_user_tips(tips: list[str], destination: str | None = None) -> list[st
 
     place_text = destination or "Destination"
     return [
-        f"Properly prepare rain gear or light jackets based on the real-time weather in {place_text}, as it can feel cooler in the mornings, evenings, and near water.",
-        f"Older streets, ecological corridors, and stone paths are better explored at a leisurely pace, so it's advisable to choose comfortable and slip-resistant footwear.",
-        f"Busy attractions are best visited during off-peak hours, allowing for a more relaxed experience with ample time for photos, meals, and transportation.",
+        f"Prepare rain gear or light jackets based on the real-time weather in {place_text}, as it can feel cooler in the mornings, evenings, and near water.",
+        "Older streets, ecological corridors, and stone paths are better explored at a leisurely pace, so it is advisable to choose comfortable and slip-resistant footwear.",
+        "Busy attractions are best visited during off-peak hours, allowing for a more relaxed experience with ample time for photos, meals, and transportation.",
     ]
 
 
 def _build_demo_spot_names(destination: str, rag_contexts: list[str], day_count: int) -> list[str]:
-    """Choose some more plausible demo spot names from the RAG contexts for fallback use when LLM draft is not available."""
+    """Choose plausible fallback spot names from RAG contexts when the LLM draft is unavailable."""
     candidate_names: list[str] = []
-    joined_context = "\n".join(rag_contexts)
+    joined_lower = "\n".join(rag_contexts).lower()
 
-    if "Krakow" in joined_context:
-        candidate_names.append("Krakow old town")
-    if "Prague" in joined_context:
-        candidate_names.append("Prague old town")
-    if "Madrid" in joined_context:
-        candidate_names.append("Madrid old town")
-    if "Paris" in joined_context:
-        candidate_names.append("Paris old town")
-    if "Milan" in joined_context:
-        candidate_names.append("Milan old town")
+    for city in ("Krakow", "Prague", "Madrid", "Paris", "Milan", "Barcelona", "Florence"):
+        if city.lower() in joined_lower:
+            candidate_names.append(f"{city} old town")
 
     while len(candidate_names) < day_count:
         candidate_names.append(f"{destination} recommended attractions {len(candidate_names) + 1}")
@@ -87,7 +94,7 @@ def _stable_bucket(text: str, modulo: int) -> int:
 
 
 def _prorate_amounts(total: float, weights: list[float]) -> list[float]:
-    """Split the amount according to weights, ensuring the sum of the split amounts equals the original total."""
+    """Split the amount according to weights, ensuring the sum equals the original total."""
     if not weights:
         return []
 
@@ -110,21 +117,30 @@ def _prorate_amounts(total: float, weights: list[float]) -> list[float]:
 
 
 def _estimate_ticket_cost(spot_name: str, description: str | None = None) -> float:
-    """Estimate ticket costs based on spot keywords, providing more realistic pricing than fixed values."""
-    text = f"{spot_name} {description or ''}"
+    """Estimate ticket costs based on spot keywords."""
+    text = f"{spot_name} {description or ''}".lower()
     bucket = _stable_bucket(text, 4)
 
-    if any(keyword in text for keyword in ("Old City", "Old Town", "Park", "Ecological Corridor", "Natural Reserve", "Wetland", "Blocks")):
-        return [0.0, 20.0, 30.0, 40.0][bucket]
-    if any(keyword in text for keyword in ("Temple", "Three Pagodas", "Museum", "Ruins", "Mountain Resort")):
-        return round(60.0 + (bucket * 18.0), 2)
-    if any(keyword in text for keyword in ("Suspended Cableway", "Cable Car", "Boat Tour", "Performance", "Snow Mountain")):
-        return round(120.0 + (bucket * 28.0), 2)
-    return round(35.0 + (bucket * 12.0), 2)
+    if any(
+        keyword in text
+        for keyword in ("old city", "old town", "park", "square", "promenade", "beach", "quarter")
+    ):
+        return [0.0, 15.0, 25.0, 35.0][bucket]
+    if any(
+        keyword in text
+        for keyword in ("cathedral", "church", "museum", "gallery", "palace", "castle", "ruins")
+    ):
+        return round(45.0 + (bucket * 15.0), 2)
+    if any(
+        keyword in text
+        for keyword in ("cableway", "cable car", "boat tour", "cruise", "performance", "tower")
+    ):
+        return round(80.0 + (bucket * 20.0), 2)
+    return round(30.0 + (bucket * 10.0), 2)
 
 
 def _build_hotel_weights(day_count: int, start_date: DateType) -> list[float]:
-    """Make hotel costs vary slightly based on weekends, the final day, and other factors."""
+    """Make hotel costs vary slightly based on weekends and stay pattern."""
     weights: list[float] = []
     for index in range(day_count):
         current_date = start_date + timedelta(days=index)
@@ -140,8 +156,12 @@ def _build_hotel_weights(day_count: int, start_date: DateType) -> list[float]:
 
 
 def _build_meal_weights(day_count: int, preferences: list[str]) -> list[float]:
-    """Increase meal budget on some days for users who prefer local cuisine."""
-    foodie_bonus = 0.12 if any(p.lower() in ("Food", "food", "foodie", "cuisine", "gourmet") for p in preferences) else 0.0
+    """Increase meal budget for users who prefer local cuisine."""
+    foodie_bonus = (
+        0.12
+        if any(p.strip().lower() in ("food", "foodie", "cuisine", "gourmet") for p in preferences)
+        else 0.0
+    )
     return [
         1.0 + foodie_bonus + (0.08 if index == day_count // 2 else 0.0) + ((index % 3) * 0.04)
         for index in range(day_count)
@@ -150,8 +170,14 @@ def _build_meal_weights(day_count: int, preferences: list[str]) -> list[float]:
 
 def _build_transport_weights(day_count: int, pace: str | None) -> list[float]:
     """Adjust transport budget slightly based on travel pace and first/last days."""
-    pace_val = (pace or "").lower()
-    pace_bonus = 0.12 if pace_val in ("Compact", "compact", "tight") else -0.04 if pace_val in ("Relaxed", "relaxed", "leisure", "leisurely") else 0.04
+    pace_val = (pace or "").strip().lower()
+    if pace_val in ("compact", "tight", "fast"):
+        pace_bonus = 0.12
+    elif pace_val in ("relax", "relaxed", "leisure", "leisurely"):
+        pace_bonus = -0.04
+    else:
+        pace_bonus = 0.04
+
     return [
         1.0 + pace_bonus + (0.16 if index in (0, day_count - 1) else 0.0) + (index * 0.03)
         for index in range(day_count)
@@ -168,11 +194,10 @@ def _apply_route_based_transport_costs(itinerary: Itinerary) -> None:
             if transport.distance_km is None:
                 continue
 
-            mode = transport.mode or ""
-            mode_l = mode.lower()
-            if any(k in mode_l for k in ("bus", "bus")):
+            mode_l = (transport.mode or "").lower()
+            if any(k in mode_l for k in ("bus", "tram", "metro", "subway")):
                 cost = max(2.0, 2.0 + (transport.distance_km * 0.25))
-            elif any(k in mode_l for k in ("walk", "walking")):
+            elif "walk" in mode_l:
                 cost = 0.0
             elif any(k in mode_l for k in ("charter", "private")):
                 cost = 30.0 + (transport.distance_km * 3.8)
@@ -183,7 +208,7 @@ def _apply_route_based_transport_costs(itinerary: Itinerary) -> None:
 
 
 def _refresh_budget_breakdown(itinerary: Itinerary, request_budget: float | None = None) -> Itinerary:
-    """Recalculate the total budget from individual line items to avoid templated summaries."""
+    """Recalculate the total budget from individual line items."""
     _apply_route_based_transport_costs(itinerary)
 
     transport_total = round(
@@ -238,9 +263,8 @@ def _maybe_enrich_itinerary_with_map_data(
 
 
 def generate_trip_itinerary(request: TripRequest) -> Itinerary:
-    """Generate a complete itinerary and produce a more realistic budget estimate."""
-    day_count = (request.end_date - request.start_date).days + 1
-    day_count = max(day_count, 1)
+    """Generate a complete itinerary and produce a realistic budget estimate."""
+    day_count = max((request.end_date - request.start_date).days + 1, 1)
 
     rag_contexts = collect_trip_context(
         destination=request.destination,
@@ -264,7 +288,7 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
         theme = (
             llm_day.theme
             if llm_day is not None
-            else f"{request.destination} Day {day_number} — relaxed tour"
+            else f"{request.destination} Day {day_number} - relaxed tour"
         )
         spot_description = (
             llm_day.spot_description
@@ -300,25 +324,34 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
         ticket_costs.append(ticket_cost)
 
     ticket_total = round(sum(ticket_costs), 2)
-    pace_val = (request.pace or "").lower()
-    target_total = request.budget * (
-        0.78 if pace_val in ("relax", "relaxed", "leisure", "leisurely") else 0.92 if pace_val in ("compact", "compact", "tight") else 0.85
-    )
+    pace_val = (request.pace or "").strip().lower()
+    if pace_val in ("relax", "relaxed", "leisure", "leisurely"):
+        pace_multiplier = 0.78
+    elif pace_val in ("compact", "tight", "fast"):
+        pace_multiplier = 0.92
+    else:
+        pace_multiplier = 0.85
+
+    target_total = request.budget * pace_multiplier
     other_budget = round(request.budget * (0.05 + min(day_count, 4) * 0.01), 2)
     allocatable_budget = max(target_total - ticket_total - other_budget, request.budget * 0.45)
 
     hotel_level = request.hotel_level or "Comfort"
-    hl = (hotel_level or "").lower()
-    if any(k in hl for k in ("Luxury", "luxury", "deluxe")):
+    hl = hotel_level.strip().lower()
+    if any(k in hl for k in ("luxury", "deluxe")):
         hotel_ratio = 0.62
-    elif any(k in hl for k in ("Premium", "Premium", "upscale", "high-end")):
+    elif any(k in hl for k in ("premium", "upscale", "high-end")):
         hotel_ratio = 0.56
-    elif any(k in hl for k in ("Economy", "budget", "economy")):
+    elif any(k in hl for k in ("economy", "budget")):
         hotel_ratio = 0.40
     else:
         hotel_ratio = 0.50
 
-    meal_ratio = 0.28 if any(p.lower() in ("Food", "food", "foodie", "cuisine", "gourmet") for p in request.preferences) else 0.22
+    meal_ratio = (
+        0.28
+        if any(p.strip().lower() in ("food", "foodie", "cuisine", "gourmet") for p in request.preferences)
+        else 0.22
+    )
     transport_ratio = max(0.12, 1 - hotel_ratio - meal_ratio)
     ratio_sum = hotel_ratio + meal_ratio + transport_ratio
 
@@ -388,7 +421,7 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
 
     preference_text = ", ".join(request.preferences) if request.preferences else "standard travel experience"
     source_notes = [
-        "Itinerary is assembled by trip_service.py and can optionally use LangChain structured output.",
+        "Itinerary is assembled by trip_service.py.",
     ]
     source_notes.extend(rag_contexts[:2])
 
@@ -400,7 +433,7 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
             "Older streets, ecological corridors, and stone paths are best explored at a leisurely pace—choose comfortable, non-slip footwear.",
         ]
     )
-    if any(("Riding" in (context or "")) or any(k in (context or "").lower() for k in ("cycle", "cycling", "bike")) for context in rag_contexts):
+    if any(("riding" in (context or "").lower()) or any(k in (context or "").lower() for k in ("cycle", "cycling", "bike")) for context in rag_contexts):
         tips.append("Local guides mention nearby cycling routes suitable for riding; consider as a backup for day 2 or 3.")
     tips = _clean_user_tips(tips, request.destination)
 
@@ -411,7 +444,7 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
     )
 
     itinerary = Itinerary(
-        trip_id=f"trip_{request.destination}_{request.start_date.isoformat()}",
+        trip_id=_build_trip_id(request.destination, request.start_date),
         destination=request.destination,
         summary=summary,
         days=days,
@@ -427,9 +460,20 @@ def generate_trip_itinerary(request: TripRequest) -> Itinerary:
     )
 
 
+def _clear_spot_geo_fields(spot: SpotItem) -> None:
+    """Clear stale location/image metadata when a spot is replaced."""
+    spot.image_url = None
+    spot.address = None
+    spot.latitude = None
+    spot.longitude = None
+    spot.poi_id = None
+
+
 def edit_trip_itinerary(request: TripEditRequest) -> Itinerary:
     """Prefer using an LLM to edit a single day's plan; fall back to rule-based edits if unsuccessful."""
     updated_itinerary = request.current_itinerary.model_copy(deep=True)
+    if request.trip_id:
+        updated_itinerary.trip_id = request.trip_id
 
     target_day = updated_itinerary.days[0] if updated_itinerary.days else None
     if request.edit_scope and request.edit_scope.startswith("day_"):
@@ -444,7 +488,6 @@ def edit_trip_itinerary(request: TripEditRequest) -> Itinerary:
         except (IndexError, ValueError):
             pass
 
-    llm_edit_applied = False
     if target_day is not None:
         day_edit_draft = generate_day_edit_draft(request, target_day)
         if day_edit_draft is not None:
@@ -456,10 +499,7 @@ def edit_trip_itinerary(request: TripEditRequest) -> Itinerary:
                     day_edit_draft.spot_name,
                     day_edit_draft.spot_description,
                 )
-                target_day.spots[0].address = None
-                target_day.spots[0].latitude = None
-                target_day.spots[0].longitude = None
-                target_day.spots[0].poi_id = None
+                _clear_spot_geo_fields(target_day.spots[0])
             if target_day.meals:
                 target_day.meals[0].name = day_edit_draft.meal_name
                 target_day.meals[0].notes = day_edit_draft.meal_notes
@@ -468,23 +508,20 @@ def edit_trip_itinerary(request: TripEditRequest) -> Itinerary:
                 target_day.notes[-1] = day_edit_draft.daily_note
             else:
                 target_day.notes.append(day_edit_draft.daily_note)
-
-            llm_edit_applied = True
         else:
-            inst = request.user_instruction or ""
-            inst_l = inst.lower()
-            if any(k in inst_l for k in ("Relaxed", "relax", "relaxed", "leisure")):
+            inst_l = (request.user_instruction or "").lower()
+            if any(k in inst_l for k in ("relax", "relaxed", "leisure")):
                 target_day.theme = f"{target_day.theme} (adjusted to be more relaxed)"
                 target_day.notes.append("Pace adjusted to be more relaxed per user request.")
 
-            if any(k in inst_l for k in ("No arrangements", "no arrange", "no arrangements", "no plan", "free activity", "free time")) and target_day.spots:
+            if any(
+                k in inst_l
+                for k in ("no arrangement", "no arrangements", "no plan", "free activity", "free time")
+            ) and target_day.spots:
                 target_day.spots[0].name = "Free activity / Flexible schedule"
                 target_day.spots[0].description = "Per user request, reduced fixed attractions and preserved more free time."
                 target_day.spots[0].estimated_cost = 0.0
-                target_day.spots[0].address = None
-                target_day.spots[0].latitude = None
-                target_day.spots[0].longitude = None
-                target_day.spots[0].poi_id = None
+                _clear_spot_geo_fields(target_day.spots[0])
 
     updated_itinerary.source_notes.append(
         f"Itinerary updated per user edit instruction: {request.user_instruction}"

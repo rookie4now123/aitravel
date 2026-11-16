@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from datetime import date as DateType, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+MAX_TRIP_DAYS = 30
 
 
 class TripRequest(BaseModel):
-    """Generate a new trip based on the user's input. The request should include all necessary information for trip generation, such as destination, dates, preferences, etc. The response will be a complete itinerary that can be directly used or further edited."""
+    """Generate a new trip based on the user's input."""
 
-    destination: str = Field(..., description="Destination, e.g., Krakow")
+    destination: str = Field(..., min_length=1, description="Destination, e.g., Krakow")
     start_date: DateType = Field(..., description="Start date of the trip")
     end_date: DateType = Field(..., description="End date of the trip")
     travelers: int = Field(..., ge=1, description="Number of travelers")
@@ -22,13 +25,25 @@ class TripRequest(BaseModel):
     hotel_level: str | None = Field(default=None, description="Hotel level preference")
     special_notes: str | None = Field(default=None, description="Special notes or requirements")
 
+    @model_validator(mode="after")
+    def validate_trip_inputs(self) -> "TripRequest":
+        self.destination = self.destination.strip()
+        if not self.destination:
+            raise ValueError("destination must not be blank.")
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date.")
+        day_count = (self.end_date - self.start_date).days + 1
+        if day_count > MAX_TRIP_DAYS:
+            raise ValueError(f"Trip duration cannot exceed {MAX_TRIP_DAYS} days.")
+        return self
+
 
 class TripEditRequest(BaseModel):
-    """Modify the itinerary request"""
+    """Modify the itinerary request."""
 
     trip_id: str = Field(..., description="Trip ID to be edited")
     current_itinerary: "Itinerary" = Field(..., description="Current complete itinerary")
-    user_instruction: str = Field(..., description="User's new modification request")
+    user_instruction: str = Field(..., min_length=1, description="User's new modification request")
     edit_scope: str | None = Field(default=None, description="Scope of the edit")
     preserve_constraints: list[str] = Field(
         default_factory=list,
@@ -45,7 +60,7 @@ class TripSaveRequest(BaseModel):
 
 
 class SpotItem(BaseModel):
-    """Single spot"""
+    """Single spot."""
 
     name: str = Field(..., description="Spot name")
     start_time: str | None = Field(default=None, description="Start time")
@@ -67,6 +82,7 @@ class MealItem(BaseModel):
     meal_type: str = Field(..., description="Breakfast, lunch, dinner, etc.")
     estimated_cost: float = Field(default=0.0, ge=0, description="Estimated cost")
     notes: str | None = Field(default=None, description="Additional notes")
+
 
 class HotelItem(BaseModel):
     """Single hotel arrangement."""
@@ -117,7 +133,7 @@ class DayPlan(BaseModel):
 
 
 class Itinerary(BaseModel):
-    """Completed Itinerary"""
+    """Completed Itinerary."""
 
     trip_id: str = Field(..., description="Unique tag")
     destination: str = Field(..., description="Destination")
@@ -128,7 +144,7 @@ class Itinerary(BaseModel):
     tips: list[str] = Field(default_factory=list, description="Travel tips")
     source_notes: list[str] = Field(
         default_factory=list,
-        description="RAG or explainations",
+        description="RAG or explanations",
     )
 
 
